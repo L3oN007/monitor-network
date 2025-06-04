@@ -11,17 +11,17 @@ API_URL = "https://65ec7c1b0ddee626c9b055b1.mockapi.io/api/v1/monitor-agent"
 SERVER_ID = subprocess.check_output("hostname", shell=True).decode().strip()
 CYCLE_TIME = 5  # 5 giây cố định
 
-def get_system_metrics_nonblocking():
+def getSystemMetricsNonblocking():
     """
     Lấy CPU, RAM, Disk và Uptime mà không block lâu.
     cpu_percent(interval=None) sẽ trả ngay giá trị phần trăm CPU so với lần gọi trước.
     """
-    cpu_pct = psutil.cpu_percent(interval=None)  # không block 1s
+    cpuPct = psutil.cpu_percent(interval=None)  # không block 1s
     vm = psutil.virtual_memory()
     du = psutil.disk_usage('/')
     return {
         "cpu": {
-            "percent": cpu_pct
+            "percent": cpuPct
         },
         "memory": {
             "totalBytes": vm.total,
@@ -41,17 +41,17 @@ def get_system_metrics_nonblocking():
         "uptimeSeconds": int(time.time() - psutil.boot_time())
     }
 
-def get_all_interface_counters():
+def getAllInterfaceCounters():
     """
     Đọc counters tích lũy (bytes sent/received) cho mỗi interface.
-    Trả về dict: { iface_name: {"rx_bytes_total": <bytes>, "tx_bytes_total": <bytes>} }
+    Trả về dict: { ifaceName: {"rxBytesTotal": <bytes>, "txBytesTotal": <bytes>} }
     """
     pernic = psutil.net_io_counters(pernic=True)
     counters = {}
     for iface, stats in pernic.items():
         counters[iface] = {
-            "rx_bytes_total": stats.bytes_recv,
-            "tx_bytes_total": stats.bytes_sent
+            "rxBytesTotal": stats.bytes_recv,
+            "txBytesTotal": stats.bytes_sent
         }
     return counters
 
@@ -64,94 +64,105 @@ def main():
     while True:
         try:
             # --- BƯỚC 1: Ghi lại thời gian và counters mạng ban đầu ---
-            start_dt = datetime.now(timezone.utc)
-            start_ts = start_dt.isoformat()
-            start_counters = get_all_interface_counters()
+            startDt = datetime.now(timezone.utc)
+            startTs = startDt.isoformat()
+            startCounters = getAllInterfaceCounters()
 
             # --- BƯỚC 2: Ngủ đúng CYCLE_TIME giây ---
             time.sleep(CYCLE_TIME)
 
             # --- BƯỚC 3: Ghi lại thời gian và counters mạng sau khi ngủ ---
-            end_dt = datetime.now(timezone.utc)
-            end_ts = end_dt.isoformat()
-            end_counters = get_all_interface_counters()
+            endDt = datetime.now(timezone.utc)
+            endTs = endDt.isoformat()
+            endCounters = getAllInterfaceCounters()
 
-            # Tính actual_duration (xấp xỉ CYCLE_TIME, có thể chênh vài ms)
-            actual_duration = (end_dt - start_dt).total_seconds()
-            if actual_duration <= 0:
-                actual_duration = CYCLE_TIME  # đề phòng trường hợp hi hữu
+            # Tính actualDuration (xấp xỉ CYCLE_TIME, có thể chênh vài ms)
+            actualDuration = (endDt - startDt).total_seconds()
+            if actualDuration <= 0:
+                actualDuration = CYCLE_TIME  # đề phòng trường hợp hi hữu
 
             # --- BƯỚC 4: Tính rate và các thông số cho mỗi interface ---
-            interfaces_data = []
+            interfacesData = []
             # Lấy tốc độ link (Mbps) cho từng interface
-            if_stats = psutil.net_if_stats()
+            ifStats = psutil.net_if_stats()
 
-            for iface, end_vals in end_counters.items():
-                start_vals = start_counters.get(iface, {"rx_bytes_total": 0, "tx_bytes_total": 0})
-                rx_delta = end_vals["rx_bytes_total"] - start_vals["rx_bytes_total"]
-                tx_delta = end_vals["tx_bytes_total"] - start_vals["tx_bytes_total"]
+            for iface, endVals in endCounters.items():
+                startVals = startCounters.get(iface, {"rxBytesTotal": 0, "txBytesTotal": 0})
+                rxDelta = endVals["rxBytesTotal"] - startVals["rxBytesTotal"]
+                txDelta = endVals["txBytesTotal"] - startVals["txBytesTotal"]
 
-                rx_rate = rx_delta / actual_duration  # bytes/sec
-                tx_rate = tx_delta / actual_duration  # bytes/sec
+                rxRate = rxDelta / actualDuration  # bytes/sec
+                txRate = txDelta / actualDuration  # bytes/sec
 
                 # Lấy link speed (Mbps); nếu không có thông tin, đặt về 0
-                speed_mbps = if_stats.get(iface).speed if (iface in if_stats and if_stats.get(iface).speed is not None) else 0
+                speedMbps = (
+                    ifStats.get(iface).speed
+                    if (iface in ifStats and ifStats.get(iface).speed is not None)
+                    else 0
+                )
 
-                # Tính utilization (%) = max(rx_rate, tx_rate) (bytes/sec) → bit/sec: *8, chia cho speed_mbps*1e6
-                if speed_mbps and speed_mbps > 0:
-                    utilization = (max(rx_rate, tx_rate) * 8) / (speed_mbps * 1_000_000) * 100
+                # Tính utilization (%) = (max(rxRate, txRate) * 8) / (speedMbps * 1_000_000) * 100
+                if speedMbps and speedMbps > 0:
+                    utilization = (max(rxRate, txRate) * 8) / (speedMbps * 1_000_000) * 100
                 else:
                     utilization = 0.0
 
-                interfaces_data.append({
-                    "interface": iface,
-                    "link_speed_mbps": speed_mbps,
-                    "rx_bytes_total": end_vals["rx_bytes_total"],
-                    "tx_bytes_total": end_vals["tx_bytes_total"],
-                    "rx_rate_bps": int(rx_rate * 8),   # chuyển từ bytes/sec sang bits/sec
-                    "tx_rate_bps": int(tx_rate * 8),   # chuyển từ bytes/sec sang bits/sec
-                    "utilization_percent": round(utilization, 2)
+                interfacesData.append({
+                    "interfaceName": iface,
+                    "linkSpeedMbps": speedMbps,
+                    "rxBytesTotal": endVals["rxBytesTotal"],
+                    "txBytesTotal": endVals["txBytesTotal"],
+                    "rxRateBps": int(rxRate * 8),   # chuyển từ bytes/sec sang bits/sec
+                    "txRateBps": int(txRate * 8),   # chuyển từ bytes/sec sang bits/sec
+                    "utilizationPercent": round(utilization, 2)
                 })
 
             # --- BƯỚC 5: Lấy system metrics không block lâu ---
-            system_metrics = get_system_metrics_nonblocking()
+            systemMetrics = getSystemMetricsNonblocking()
 
-            # --- BƯỚC 6: Đóng gói payload JSON theo đúng định dạng mong muốn ---
+            # --- BƯỚC 6: Đóng gói payload JSON theo định dạng camelCase ---
             payload = {
-                "messageType": "realtime_snapshot",
+                "messageType": "realtimeSnapshot",
                 "serverId": SERVER_ID,
                 "snapshotTime": datetime.now(timezone.utc).isoformat(),
-                "metrics": system_metrics,
+                "metrics": systemMetrics,
                 "network": {
-                    "collectionStartTime": start_ts,
-                    "collectionEndTime": end_ts,
-                    "collectionDurationSeconds": int(actual_duration),
-                    "interfaces": interfaces_data
+                    "collectionStartTime": startTs,
+                    "collectionEndTime": endTs,
+                    "collectionDurationSeconds": int(actualDuration),
+                    "interfaces": interfacesData
                 }
             }
 
             # --- BƯỚC 7: In ra console để debug ---
             print(f"[{payload['snapshotTime']}] System Metrics:")
-            print(f"  CPU: {system_metrics['cpu']['percent']}%")
-            print(f"  RAM: {system_metrics['memory']['usedBytes'] // (1024*1024)}MB/"
-                  f"{system_metrics['memory']['totalBytes'] // (1024*1024)}MB "
-                  f"({system_metrics['memory']['percentUsed']}%)")
-            print(f"  Disk(/): {system_metrics['disk'][0]['usedBytes'] // (1024*1024)}MB/"
-                  f"{system_metrics['disk'][0]['totalBytes'] // (1024*1024)}MB "
-                  f"({system_metrics['disk'][0]['percentUsed']}%)")
-            print(f"  Uptime: {system_metrics['uptimeSeconds'] // 3600}h "
-                  f"{(system_metrics['uptimeSeconds'] % 3600) // 60}m")
+            print(f"  CPU: {systemMetrics['cpu']['percent']}%")
+            print(
+                f"  RAM: {systemMetrics['memory']['usedBytes'] // (1024*1024)}MB/"
+                f"{systemMetrics['memory']['totalBytes'] // (1024*1024)}MB "
+                f"({systemMetrics['memory']['percentUsed']}%)"
+            )
+            print(
+                f"  Disk(/): {systemMetrics['disk'][0]['usedBytes'] // (1024*1024)}MB/"
+                f"{systemMetrics['disk'][0]['totalBytes'] // (1024*1024)}MB "
+                f"({systemMetrics['disk'][0]['percentUsed']}%)"
+            )
+            print(
+                f"  Uptime: {systemMetrics['uptimeSeconds'] // 3600}h "
+                f"{(systemMetrics['uptimeSeconds'] % 3600) // 60}m"
+            )
 
-            print(f"\nNetwork Collection Window: {start_ts} → {end_ts} "
-                  f"(≈ {int(actual_duration)}s)")
-            for iface_obj in interfaces_data:
-                print(f"  - {iface_obj['interface']}: "
-                      f"Link Speed={iface_obj['link_speed_mbps']}Mbps, "
-                      f"RX_total={iface_obj['rx_bytes_total']}B, "
-                      f"TX_total={iface_obj['tx_bytes_total']}B, "
-                      f"RX_rate={iface_obj['rx_rate_bps']}bps, "
-                      f"TX_rate={iface_obj['tx_rate_bps']}bps, "
-                      f"Utilization={iface_obj['utilization_percent']}%")
+            print(f"\nNetwork Collection Window: {startTs} → {endTs} (≈ {int(actualDuration)}s)")
+            for ifaceObj in interfacesData:
+                print(
+                    f"  - {ifaceObj['interfaceName']}: "
+                    f"LinkSpeed={ifaceObj['linkSpeedMbps']}Mbps, "
+                    f"RX_total={ifaceObj['rxBytesTotal']}B, "
+                    f"TX_total={ifaceObj['txBytesTotal']}B, "
+                    f"RX_rate={ifaceObj['rxRateBps']}bps, "
+                    f"TX_rate={ifaceObj['txRateBps']}bps, "
+                    f"Utilization={ifaceObj['utilizationPercent']}%"
+                )
 
             # --- BƯỚC 8: Gửi payload lên API nếu cần ---
             try:

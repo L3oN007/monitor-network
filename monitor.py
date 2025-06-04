@@ -75,7 +75,7 @@ def start_packet_capture(interface, duration):
     finally:
         capture_active = False
 
-def getDeviceBandwidthStats(device_ip, duration_seconds):
+def getDeviceBandwidthStats(device_ip, duration_seconds, interface_link_speed_bps):
     """
     Get bandwidth statistics for a specific device
     """
@@ -87,9 +87,8 @@ def getDeviceBandwidthStats(device_ip, duration_seconds):
     rx_rate_bps = int((stats["rx_bytes"] * 8) / duration_seconds) if duration_seconds > 0 else 0
     tx_rate_bps = int((stats["tx_bytes"] * 8) / duration_seconds) if duration_seconds > 0 else 0
     
-    # Calculate utilization (assuming 100Mbps connection for devices)
-    # You can adjust this based on your network setup
-    max_bandwidth_bps = 100 * 1_000_000  # 100 Mbps
+    # Calculate utilization using the provided interface link speed
+    max_bandwidth_bps = interface_link_speed_bps
     utilization = (max(rx_rate_bps, tx_rate_bps) / max_bandwidth_bps * 100) if max_bandwidth_bps > 0 else 0
     
     return {
@@ -144,7 +143,7 @@ def getAllInterfaceCounters():
         }
     return counters
 
-def getConnectedDevices(interface, ip_range, duration_seconds=0):
+def getConnectedDevices(interface, ip_range, duration_seconds=0, scan_interface_speed_bps=0):
     """
     Sử dụng arp-scan để quét các thiết bị trong ip_range qua interface.
     Trả về danh sách devices, mỗi device có: ip, mac, deviceName, status, timeChecked, bandwidth.
@@ -173,7 +172,7 @@ def getConnectedDevices(interface, ip_range, duration_seconds=0):
                     hostname = ""
                 
                 # Get bandwidth statistics for this device
-                bandwidth_stats = getDeviceBandwidthStats(ip_addr, duration_seconds)
+                bandwidth_stats = getDeviceBandwidthStats(ip_addr, duration_seconds, scan_interface_speed_bps)
                 
                 devices.append({
                     "ip": ip_addr,
@@ -261,7 +260,12 @@ def main():
             systemMetrics = getSystemMetricsNonblocking()
 
             # --- BƯỚC 6: Quét các thiết bị đang kết nối qua arp-scan với bandwidth data ---
-            connectedDevices = getConnectedDevices(SCAN_INTERFACE, NETWORK_RANGE, actualDuration)
+            # Get the speed of the SCAN_INTERFACE to pass to getConnectedDevices
+            scan_interface_details = ifStats.get(SCAN_INTERFACE)
+            scan_interface_speed_mbps = scan_interface_details.speed if (scan_interface_details and scan_interface_details.speed is not None) else 0
+            scan_interface_link_speed_bps = scan_interface_speed_mbps * 1_000_000
+            
+            connectedDevices = getConnectedDevices(SCAN_INTERFACE, NETWORK_RANGE, actualDuration, scan_interface_link_speed_bps)
 
             # --- BƯỚC 7: Đóng gói payload JSON theo định dạng camelCase ---
             payload = {

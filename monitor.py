@@ -4,10 +4,10 @@ import psutil
 import subprocess
 import socket
 import requests
-import pyshark
 import threading
 from collections import defaultdict
 from datetime import datetime, timezone
+from scapy.all import sniff, IP
 
 # Configuration
 API_KEY = "local_test_key_123"  # Thay bằng API key thật nếu cần
@@ -18,6 +18,7 @@ CYCLE_TIME = 5  # 5 giây cố định
 # Định nghĩa mạng để quét và interface sử dụng cho arp-scan
 NETWORK_RANGE = "192.168.1.0/24"
 SCAN_INTERFACE = "enp2s0"
+LOCAL_NETWORK_PREFIX = NETWORK_RANGE.split('/')[0].rsplit('.', 1)[0] + '.' # Derived from NETWORK_RANGE (e.g., "192.168.1.")
 
 # Global variables for packet capture
 packet_stats = defaultdict(lambda: {"rx_bytes": 0, "tx_bytes": 0})
@@ -27,35 +28,35 @@ def packet_handler(packet):
     """
     Handler function for captured packets to track bandwidth per device
     """
-    global packet_stats, capture_active
+    global packet_stats, capture_active, LOCAL_NETWORK_PREFIX
     
     if not capture_active:
         return
         
     try:
-        # Get packet size
-        packet_size = int(packet.length)
-        
-        # Extract IP addresses
-        if hasattr(packet, 'ip'):
-            src_ip = packet.ip.src
-            dst_ip = packet.ip.dst
-            
+        if IP in packet:
+            src_ip = packet[IP].src
+            dst_ip = packet[IP].dst
+            packet_size = len(packet) # Packet size in bytes
+
             # Check if source IP is in our network range (outgoing traffic)
-            if src_ip.startswith('192.168.1.'):
+            if src_ip.startswith(LOCAL_NETWORK_PREFIX):
                 packet_stats[src_ip]["tx_bytes"] += packet_size
                 
             # Check if destination IP is in our network range (incoming traffic)
-            if dst_ip.startswith('192.168.1.'):
+            if dst_ip.startswith(LOCAL_NETWORK_PREFIX):
                 packet_stats[dst_ip]["rx_bytes"] += packet_size
                 
+            # General debugging for all IP packets
+            print(f"DEBUG: Captured IP Packet: {src_ip} -> {dst_ip}, Size: {packet_size} bytes")
+                
     except Exception as e:
-        # Ignore packet parsing errors
+        # print(f"Scapy packet parsing error: {e}") # Uncomment for debugging
         pass
 
 def start_packet_capture(interface, duration):
     """
-    Start packet capture for the specified duration
+    Start packet capture for the specified duration using Scapy
     """
     global packet_stats, capture_active
     
@@ -64,20 +65,17 @@ def start_packet_capture(interface, duration):
     capture_active = True
     
     try:
-        # Create capture object
-        capture = pyshark.LiveCapture(interface=interface)
-        
-        # Start capture with timeout
-        capture.apply_on_packets(packet_handler, timeout=duration)
+        # Start capture with timeout. filter='ip' to only process IP packets
+        sniff(iface=interface, prn=packet_handler, timeout=duration, store=0, filter="ip")
         
     except Exception as e:
-        print(f"Packet capture error: {e}")
+        print(f"Scapy capture error: {e}")
     finally:
         capture_active = False
 
 def getDeviceBandwidthStats(device_ip, duration_seconds, interface_link_speed_bps):
     """
-    Get bandwidth statistics for a specific device
+    Get bandwidth statistics for a specific device using captured packet stats
     """
     global packet_stats
     
@@ -143,13 +141,12 @@ def getAllInterfaceCounters():
         }
     return counters
 
-def getConnectedDevices(interface, ip_range, duration_seconds=0, scan_interface_speed_bps=0, time_checked_iso=None):
+def getConnectedDevices(interface, ip_range, duration_seconds, scan_interface_speed_bps, time_checked_iso=None):
     """
     Sử dụng arp-scan để quét các thiết bị trong ip_range qua interface.
     Trả về danh sách devices, mỗi device có: ip, mac, deviceName, status, timeChecked, bandwidth.
     """
     devices = []
-    # Sử dụng time_checked_iso được truyền vào, nếu không có thì tạo mới (dù không mong đợi trong luồng mới)
     final_time_checked = time_checked_iso if time_checked_iso else datetime.now(timezone.utc).isoformat()
     try:
         # Chạy lệnh arp-scan
@@ -172,7 +169,7 @@ def getConnectedDevices(interface, ip_range, duration_seconds=0, scan_interface_
                 except Exception:
                     hostname = ""
                 
-                # Get bandwidth statistics for this device
+                # Get bandwidth statistics for this device using Scapy-derived stats
                 bandwidth_stats = getDeviceBandwidthStats(ip_addr, duration_seconds, scan_interface_speed_bps)
                 
                 devices.append({
@@ -180,10 +177,11 @@ def getConnectedDevices(interface, ip_range, duration_seconds=0, scan_interface_
                     "mac": mac_addr,
                     "deviceName": hostname,
                     "status": "active",
-                    "timeChecked": final_time_checked,  # Sử dụng timestamp nhất quán
+                    "timeChecked": final_time_checked,
                     "bandwidth": bandwidth_stats
                 })
-    except Exception:
+    except Exception as e:
+        print(f"Error running arp-scan or processing its output: {e}") # For debugging
         # Nếu arp-scan không cài đặt hoặc lỗi, trả về list rỗng
         return []
     return devices
@@ -192,7 +190,9 @@ def main():
     # --- BƯỚC 0: Khởi động CPU counter để cpu_percent(interval=None) lần sau trả đúng giá trị ---
     psutil.cpu_percent(interval=None)
 
-    print(f"Starting monitor-agent for server '{SERVER_ID}' (interval = {CYCLE_TIME}s)\n")
+    print(f"Starting monitor-agent for server '{SERVER_ID}' (interval = {CYCLE_TIME}s)")
+    print("Note: Using Scapy for per-device bandwidth tracking.")
+    print()
 
     while True:
         try:
@@ -201,12 +201,12 @@ def main():
             startTs = startDt.isoformat()
             startCounters = getAllInterfaceCounters()
 
-            # --- BƯỚC 1.5: Bắt đầu packet capture trong background thread ---
+            # --- BƯỚC 1.5: Bắt đầu packet capture in background thread ---
             capture_thread = threading.Thread(
                 target=start_packet_capture, 
                 args=(SCAN_INTERFACE, CYCLE_TIME)
             )
-            capture_thread.daemon = True
+            capture_thread.daemon = True # Allow main program to exit even if thread is running
             capture_thread.start()
 
             # --- BƯỚC 2: Ngủ đúng CYCLE_TIME giây ---
@@ -217,8 +217,8 @@ def main():
             endTs = endDt.isoformat()
             endCounters = getAllInterfaceCounters()
 
-            # Đợi capture thread hoàn thành
-            capture_thread.join(timeout=1)
+            # Wait for capture thread to complete
+            capture_thread.join(timeout=1) # Give it a bit more time to finish
 
             # Tính actualDuration (xấp xỉ CYCLE_TIME, có thể chênh vài ms)
             actualDuration = (endDt - startDt).total_seconds()
@@ -272,7 +272,7 @@ def main():
                 NETWORK_RANGE, 
                 actualDuration, 
                 scan_interface_link_speed_bps,
-                current_snapshot_time # Truyền snapshot time nhất quán
+                current_snapshot_time
             )
 
             # Thêm thông tin thiết bị hiện tại (máy đang chạy script)
@@ -298,16 +298,18 @@ def main():
                     "mac": local_mac_on_scan_interface,
                     "deviceName": SERVER_ID, # Sử dụng hostname của server làm tên thiết bị
                     "status": "active", 
-                    "timeChecked": current_snapshot_time, # Timestamp nhất quán
+                    "timeChecked": current_snapshot_time,
                     "bandwidth": local_device_bandwidth
                 }
-                connectedDevices.append(current_device_info)
+                # Avoid duplicating if local IP is already found by arp-scan
+                if not any(d['ip'] == local_ip_on_scan_interface for d in connectedDevices):
+                    connectedDevices.append(current_device_info)
 
             # --- BƯỚC 7: Đóng gói payload JSON theo định dạng camelCase ---
             payload = {
                 "messageType": "realtimeSnapshot",
                 "serverId": SERVER_ID,
-                "snapshotTime": current_snapshot_time, # Sử dụng snapshot time nhất quán
+                "snapshotTime": current_snapshot_time,
                 "metrics": systemMetrics,
                 "network": {
                     "collectionStartTime": startTs,

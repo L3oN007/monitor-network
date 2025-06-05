@@ -143,13 +143,14 @@ def getAllInterfaceCounters():
         }
     return counters
 
-def getConnectedDevices(interface, ip_range, duration_seconds=0, scan_interface_speed_bps=0):
+def getConnectedDevices(interface, ip_range, duration_seconds=0, scan_interface_speed_bps=0, time_checked_iso=None):
     """
     Sử dụng arp-scan để quét các thiết bị trong ip_range qua interface.
     Trả về danh sách devices, mỗi device có: ip, mac, deviceName, status, timeChecked, bandwidth.
     """
     devices = []
-    time_checked = datetime.now(timezone.utc).isoformat()
+    # Sử dụng time_checked_iso được truyền vào, nếu không có thì tạo mới (dù không mong đợi trong luồng mới)
+    final_time_checked = time_checked_iso if time_checked_iso else datetime.now(timezone.utc).isoformat()
     try:
         # Chạy lệnh arp-scan
         result = subprocess.run(
@@ -179,7 +180,7 @@ def getConnectedDevices(interface, ip_range, duration_seconds=0, scan_interface_
                     "mac": mac_addr,
                     "deviceName": hostname,
                     "status": "active",
-                    "timeChecked": time_checked,
+                    "timeChecked": final_time_checked,  # Sử dụng timestamp nhất quán
                     "bandwidth": bandwidth_stats
                 })
     except Exception:
@@ -259,19 +260,54 @@ def main():
             # --- BƯỚC 5: Lấy system metrics không block lâu ---
             systemMetrics = getSystemMetricsNonblocking()
 
-            # --- BƯỚC 6: Quét các thiết bị đang kết nối qua arp-scan với bandwidth data ---
-            # Get the speed of the SCAN_INTERFACE to pass to getConnectedDevices
+            # --- BƯỚC 6: Quét các thiết bị đang kết nối và thêm thông tin thiết bị hiện tại ---
+            current_snapshot_time = datetime.now(timezone.utc).isoformat()
+
             scan_interface_details = ifStats.get(SCAN_INTERFACE)
             scan_interface_speed_mbps = scan_interface_details.speed if (scan_interface_details and scan_interface_details.speed is not None) else 0
             scan_interface_link_speed_bps = scan_interface_speed_mbps * 1_000_000
             
-            connectedDevices = getConnectedDevices(SCAN_INTERFACE, NETWORK_RANGE, actualDuration, scan_interface_link_speed_bps)
+            connectedDevices = getConnectedDevices(
+                SCAN_INTERFACE, 
+                NETWORK_RANGE, 
+                actualDuration, 
+                scan_interface_link_speed_bps,
+                current_snapshot_time # Truyền snapshot time nhất quán
+            )
+
+            # Thêm thông tin thiết bị hiện tại (máy đang chạy script)
+            local_ip_on_scan_interface = "N/A"
+            local_mac_on_scan_interface = "N/A"
+            
+            if_addrs = psutil.net_if_addrs()
+            if SCAN_INTERFACE in if_addrs:
+                for addr_info in if_addrs[SCAN_INTERFACE]:
+                    if addr_info.family == socket.AF_INET:
+                        local_ip_on_scan_interface = addr_info.address
+                    elif addr_info.family == socket.AF_PACKET: # Đặc thù Linux cho địa chỉ MAC
+                        local_mac_on_scan_interface = addr_info.address
+            
+            if local_ip_on_scan_interface != "N/A":
+                local_device_bandwidth = getDeviceBandwidthStats(
+                    local_ip_on_scan_interface, 
+                    actualDuration, 
+                    scan_interface_link_speed_bps
+                )
+                current_device_info = {
+                    "ip": local_ip_on_scan_interface,
+                    "mac": local_mac_on_scan_interface,
+                    "deviceName": SERVER_ID, # Sử dụng hostname của server làm tên thiết bị
+                    "status": "active", 
+                    "timeChecked": current_snapshot_time, # Timestamp nhất quán
+                    "bandwidth": local_device_bandwidth
+                }
+                connectedDevices.append(current_device_info)
 
             # --- BƯỚC 7: Đóng gói payload JSON theo định dạng camelCase ---
             payload = {
                 "messageType": "realtimeSnapshot",
                 "serverId": SERVER_ID,
-                "snapshotTime": datetime.now(timezone.utc).isoformat(),
+                "snapshotTime": current_snapshot_time, # Sử dụng snapshot time nhất quán
                 "metrics": systemMetrics,
                 "network": {
                     "collectionStartTime": startTs,
